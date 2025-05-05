@@ -25,3 +25,7 @@ echo "http://testphp.vulnweb.com/listproducts.php?cat=ok" | bxsser -p payloads.t
 ```
 bxsser -u "http://testphp.vulnweb.com/listproducts.php?cat=ok" -p payloads.txt
 ```
+#### File scanning
+```
+bxsser -f urls.txt -p payloads.txt
+```
