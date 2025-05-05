@@ -11,7 +11,7 @@ sudo rm -rf bxsser
 echo "bxsser===================================="
 cd /opt/ && sudo git clone https://github.com/h6nt3r/bxsser.git && cd bxsser/
 sudo chmod +x ./*
-sudo pip3 install -r requirements.txt
+sudo pip3 install -r requirements.txt --break-system-packages
 cd
 sudo ln -sf /opt/bxsser/bxsser.py /usr/local/bin/bxsser
 bxsser -h
