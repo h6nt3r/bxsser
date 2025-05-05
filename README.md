@@ -16,3 +16,8 @@ cd
 sudo ln -sf /opt/bxsser/bxsser.py /usr/local/bin/bxsser
 bxsser -h
 ```
+## Usage
+#### Stdio mode
+```
+echo "http://testphp.vulnweb.com/listproducts.php?cat=ok" | bxsser -p payloads.txt
+```
