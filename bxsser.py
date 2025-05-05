@@ -131,8 +131,11 @@ def check_xss_vulnerability(base_url, driver, encode_times, vulnerable_urls, pay
             print(f"\033[0;33m[DEBUG] No * found in query parameters\033[0m")
         return
 
+    # Total number of parameters to scan
+    total_params = len(params_to_scan)
+
     # Process parameters (either * marked or all if no * and require_star is False)
-    for param_name, param_values in params_to_scan.items():
+    for param_index, (param_name, param_values) in enumerate(params_to_scan.items(), start=1):
         for param_value in param_values:
             if "*" in param_value:
                 # Handle * marked parameters
@@ -150,7 +153,7 @@ def check_xss_vulnerability(base_url, driver, encode_times, vulnerable_urls, pay
                         modified_query_params[param_name] = [final_value]
                         full_url = f"{base_url_no_query}?{'&'.join([f'{key}={urllib.parse.quote(value[0])}' for key, value in modified_query_params.items()])}"
 
-                        print(f"\033[0;35m[i] Parameter: \033[0m\033[0;37m{param_name}\033[0m")
+                        print(f"\033[0;35m[i] Parameter({param_index}/{total_params}): \033[0m\033[0;37m{param_name}\033[0m")
                         print(f"\033[0;35m[i] Payload({index}/{total_payloads}): \033[0m\033[0;37m{payload}\033[0m")
                         print(f"\033[0;35m[i] Payload Encoded {encode_step}-{encode_times} times: \033[0m\033[0;37m{encoded_payload}\033[0m")
                         print(f"\033[0;36m[i] URL({url_index}/{total_urls}): \033[0m\033[0;37m{full_url}\033[0m")
@@ -180,7 +183,7 @@ def check_xss_vulnerability(base_url, driver, encode_times, vulnerable_urls, pay
                         modified_query_params[param_name] = [encoded_payload]
                         full_url = f"{base_url_no_query}?{'&'.join([f'{key}={urllib.parse.quote(value[0])}' for key, value in modified_query_params.items()])}"
 
-                        print(f"\033[0;35m[i] Parameter: \033[0m\033[0;37m{param_name}\033[0m")
+                        print(f"\033[0;35m[i] Parameter({param_index}/{total_params}): \033[0m\033[0;37m{param_name}\033[0m")
                         print(f"\033[0;35m[i] Payload({index}/{total_payloads}): \033[0m\033[0;37m{payload}\033[0m")
                         print(f"\033[0;35m[i] Payload Encoded {encode_step}-{encode_times} times: \033[0m\033[0;37m{encoded_payload}\033[0m")
                         print(f"\033[0;36m[i] URL({url_index}/{total_urls}): \033[0m\033[0;37m{full_url}\033[0m")
