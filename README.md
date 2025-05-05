@@ -9,7 +9,7 @@ sudo apt install ./google-chrome-stable*.deb -y
 cd
 sudo rm -rf bxsser
 echo "bxsser===================================="
-cd /opt/ && sudo git clone https://github.com/mrok716/bxsser.git && cd bxsser/
+cd /opt/ && sudo git clone https://github.com/h6nt3r/bxsser.git && cd bxsser/
 sudo chmod +x ./*
 sudo pip3 install -r requirements.txt
 cd
