@@ -5,13 +5,39 @@ import time
 import sys
 import argparse
 import urllib.parse
+import base64
 from urllib.parse import urlparse, parse_qs
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
 from webdriver_manager.chrome import ChromeDriverManager
 import random
-import traceback
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from queue import Queue
+import signal
+
+# Thread-safe queue for printing to avoid interleaved output
+print_queue = Queue()
+print_lock = threading.Lock()
+
+def thread_safe_print(*args, **kwargs):
+    with print_lock:
+        print(*args, **kwargs)
+        sys.stdout.flush()
+
+def handle_exit(signum, frame):
+    thread_safe_print("\n\033[0;31m[!] Program interrupted. Exiting...\033[0m")
+    sys.exit(1)
+
+def encode_payload(payload, encoding_type):
+    if encoding_type == "url":
+        return urllib.parse.quote(payload)
+    elif encoding_type == "base64":
+        return base64.b64encode(payload.encode()).decode()
+    elif encoding_type == "ascii":
+        return ''.join([str(ord(c)) for c in payload])
+    return payload  # No encoding if none specified
 
 def set_random_user_agent_and_preferences(options):
     user_agents = [
@@ -80,8 +106,8 @@ def display_welcome_message():
     created_by_text = "Program created by: h6nt3r, and inspired by AnonKryptiQuz"
     ascii_width = 45
     padding = (ascii_width - len(created_by_text)) // 2
-    print(" " * padding + f"\033[0;31m{created_by_text}\033[0m")
-    print("")
+    thread_safe_print(" " * padding + f"\033[0;31m{created_by_text}\033[0m")
+    thread_safe_print("")
 
 def is_valid_url(url):
     url_pattern = r"^(http|https)://[a-zA-Z0-9.-]+(\.[a-zA-Z]{2,})(/.*)?$"
@@ -89,233 +115,85 @@ def is_valid_url(url):
 
 def load_payloads(payload_file):
     if not os.path.isfile(payload_file):
-        print(f"\033[0;31m[!] Payload file {payload_file} does not exist.\033[0m")
+        thread_safe_print(f"\033[0;31m[!] Payload file {payload_file} does not exist.\033[0m")
         sys.exit(1)
     with open(payload_file, 'r') as file:
         payloads = [line.strip() for line in file if line.strip()]
     if not payloads:
-        print(f"\033[0;31m[!] Payload file {payload_file} is empty.\033[0m")
+        thread_safe_print(f"\033[0;31m[!] Payload file {payload_file} is empty.\033[0m")
         sys.exit(1)
     return payloads
 
-def check_xss_vulnerability(base_url, driver, encode_times, vulnerable_urls, payloads, url_index, total_urls, debug=False, require_star=False):
+def check_xss_vulnerability(base_url, driver, encoding_type, vulnerable_urls, payloads, url_index, total_urls):
     parsed_url = urlparse(base_url)
     query_params = parse_qs(parsed_url.query)
     base_url_no_query = base_url.split('?')[0]
 
-    if debug:
-        print(f"\033[0;33m[DEBUG] Processing URL: {base_url}\033[0m")
-        print(f"\033[0;33m[DEBUG] Query Parameters: {query_params}\033[0m")
-
     if not query_params:
-        print(f"\033[0;31m[!] URL skipped: No query parameters found: {base_url}\033[0m")
-        if debug:
-            print(f"\033[0;33m[DEBUG] No query parameters found, skipping URL\033[0m")
+        thread_safe_print(f"\033[0;31m[!] URL skipped: No query parameters found: {base_url}\033[0m")
         return
 
-    # Total number of payloads
     total_payloads = len(payloads)
-
-    # Find parameters with * injection point
     injection_params = {param: values for param, values in query_params.items() if any("*" in v for v in values)}
-
-    if debug:
-        print(f"\033[0;33m[DEBUG] Parameters with *: {injection_params}\033[0m")
-
-    # Determine which parameters to scan
-    params_to_scan = injection_params if injection_params else ({} if require_star else query_params)
+    params_to_scan = injection_params if injection_params else query_params
 
     if not params_to_scan:
-        print(f"\033[0;31m[!] URL skipped: No * found in query parameters: {base_url}\033[0m")
-        if debug:
-            print(f"\033[0;33m[DEBUG] No * found in query parameters\033[0m")
+        thread_safe_print(f"\033[0;31m[!] URL skipped: No parameters to scan: {base_url}\033[0m")
         return
 
-    # Total number of parameters to scan
     total_params = len(params_to_scan)
 
-    # Process parameters (either * marked or all if no * and require_star is False)
     for param_index, (param_name, param_values) in enumerate(params_to_scan.items(), start=1):
         for param_value in param_values:
             if "*" in param_value:
-                # Handle * marked parameters
                 for index, payload in enumerate(payloads, start=1):
-                    for encode_step in range(encode_times + 1):
-                        encoded_payload = payload
-                        for _ in range(encode_step):
-                            encoded_payload = urllib.parse.quote(encoded_payload)
+                    encoded_payload = encode_payload(payload, encoding_type)
 
-                        # Replace * with the encoded payload
-                        final_value = param_value.replace("*", encoded_payload)
+                    final_value = param_value.replace("*", encoded_payload)
+                    modified_query_params = query_params.copy()
+                    modified_query_params[param_name] = [final_value]
+                    full_url = f"{base_url_no_query}?{'&'.join([f'{key}={urllib.parse.quote(value[0])}' for key, value in modified_query_params.items()])}"
 
-                        # Construct the modified query string
-                        modified_query_params = query_params.copy()
-                        modified_query_params[param_name] = [final_value]
-                        full_url = f"{base_url_no_query}?{'&'.join([f'{key}={urllib.parse.quote(value[0])}' for key, value in modified_query_params.items()])}"
+                    thread_safe_print(f"\033[0;35m[i] Parameter({param_index}/{total_params}): \033[0m\033[0;37m{param_name}\033[0m")
+                    thread_safe_print(f"\033[0;35m[i] Payload({index}/{total_payloads}): \033[0m\033[0;37m{payload}\033[0m")
+                    thread_safe_print(f"\033[0;35m[i] Payload Encoded ({encoding_type or 'none'}): \033[0m\033[0;37m{encoded_payload}\033[0m")
+                    thread_safe_print(f"\033[0;36m[i] URL({url_index}/{total_urls}): \033[0m\033[0;37m{full_url}\033[0m")
 
-                        print(f"\033[0;35m[i] Parameter({param_index}/{total_params}): \033[0m\033[0;37m{param_name}\033[0m")
-                        print(f"\033[0;35m[i] Payload({index}/{total_payloads}): \033[0m\033[0;37m{payload}\033[0m")
-                        print(f"\033[0;35m[i] Payload Encoded {encode_step}-{encode_times} times: \033[0m\033[0;37m{encoded_payload}\033[0m")
-                        print(f"\033[0;36m[i] URL({url_index}/{total_urls}): \033[0m\033[0;37m{full_url}\033[0m")
-
-                        try:
-                            driver.get(full_url)
-                            time.sleep(3)
-                            if "xss.report" in driver.page_source:
+                    try:
+                        driver.get(full_url)
+                        time.sleep(3)
+                        if "xss.report" in driver.page_source:
+                            with threading.Lock():
                                 vulnerable_urls.append(full_url)
-                        except Exception as e:
-                            print(f"\033[0;31m[!] Error accessing URL {full_url}: {e}\033[0m")
-                            if debug:
-                                print(f"\033[0;33m[DEBUG] Exception details: {traceback.format_exc()}\033[0m")
+                    except Exception as e:
+                        thread_safe_print(f"\033[0;31m[!] Error accessing URL {full_url}: {e}\033[0m")
 
-                        # Add a new line after each scan
-                        print()
-            else:
-                # Handle non-* parameters (when require_star is False)
+                    thread_safe_print()
+            elif not injection_params:
                 for index, payload in enumerate(payloads, start=1):
-                    for encode_step in range(encode_times + 1):
-                        encoded_payload = payload
-                        for _ in range(encode_step):
-                            encoded_payload = urllib.parse.quote(encoded_payload)
+                    encoded_payload = encode_payload(payload, encoding_type)
 
-                        # Replace the entire parameter value with the encoded payload
-                        modified_query_params = query_params.copy()
-                        modified_query_params[param_name] = [encoded_payload]
-                        full_url = f"{base_url_no_query}?{'&'.join([f'{key}={urllib.parse.quote(value[0])}' for key, value in modified_query_params.items()])}"
+                    modified_query_params = query_params.copy()
+                    modified_query_params[param_name] = [encoded_payload]
+                    full_url = f"{base_url_no_query}?{'&'.join([f'{key}={urllib.parse.quote(value[0])}' for key, value in modified_query_params.items()])}"
 
-                        print(f"\033[0;35m[i] Parameter({param_index}/{total_params}): \033[0m\033[0;37m{param_name}\033[0m")
-                        print(f"\033[0;35m[i] Payload({index}/{total_payloads}): \033[0m\033[0;37m{payload}\033[0m")
-                        print(f"\033[0;35m[i] Payload Encoded {encode_step}-{encode_times} times: \033[0m\033[0;37m{encoded_payload}\033[0m")
-                        print(f"\033[0;36m[i] URL({url_index}/{total_urls}): \033[0m\033[0;37m{full_url}\033[0m")
+                    thread_safe_print(f"\033[0;35m[i] Parameter({param_index}/{total_params}): \033[0m\033[0;37m{param_name}\033[0m")
+                    thread_safe_print(f"\033[0;35m[i] Payload({index}/{total_payloads}): \033[0m\033[0;37m{payload}\033[0m")
+                    thread_safe_print(f"\033[0;35m[i] Payload Encoded ({encoding_type or 'none'}): \033[0m\033[0;37m{encoded_payload}\033[0m")
+                    thread_safe_print(f"\033[0;36m[i] URL({url_index}/{total_urls}): \033[0m\033[0;37m{full_url}\033[0m")
 
-                        try:
-                            driver.get(full_url)
-                            time.sleep(3)
-                            if "xss.report" in driver.page_source:
+                    try:
+                        driver.get(full_url)
+                        time.sleep(3)
+                        if "xss.report" in driver.page_source:
+                            with threading.Lock():
                                 vulnerable_urls.append(full_url)
-                        except Exception as e:
-                            print(f"\033[0;31m[!] Error accessing URL {full_url}: {e}\033[0m")
-                            if debug:
-                                print(f"\033[0;33m[DEBUG] Exception details: {traceback.format_exc()}\033[0m")
+                    except Exception as e:
+                        thread_safe_print(f"\033[0;31m[!] Error accessing URL {full_url}: {e}\033[0m")
 
-                        # Add a new line after each scan
-                        print()
+                    thread_safe_print()
 
-def save_results_to_file(vulnerable_urls, output_file):
-    if not output_file:
-        return
-    try:
-        print(f"\033[1;33m[i] Saving results to {output_file}...\033[0m")
-        with open(output_file, 'w') as file:
-            for url in vulnerable_urls:
-                file.write(f"{url}\n")
-        print(f"\033[0;32m[i] Results saved to {output_file}\033[0m")
-    except Exception as e:
-        print(f"\033[0;31m[!] Error saving results to {output_file}: {e}\033[0m")
-
-def handle_exit(signum, frame):
-    print("\n\033[0;31m[!] Program interrupted. Exiting...\033[0m")
-    sys.exit(1)
-
-def scan_urls_from_file(file_path, driver, encode_times, vulnerable_urls, payloads, debug=False, require_star=False):
-    if not os.path.isfile(file_path):
-        print(f"\033[0;31m[!] URL file {file_path} does not exist.\033[0m")
-        sys.exit(1)
-    valid_urls = []
-    # First pass: Collect valid URLs with query parameters
-    with open(file_path, 'r') as file:
-        for line in file:
-            base_url = line.strip()
-            if not base_url:
-                continue
-            if is_valid_url(base_url):
-                query_params = extract_query_parameter_name(base_url)
-                if query_params:
-                    valid_urls.append(base_url)
-            else:
-                print(f"\033[0;31m[!] Invalid URL skipped: {base_url}\033[0m")
-    
-    total_urls = len(valid_urls)
-    for index, base_url in enumerate(valid_urls, start=1):
-        check_xss_vulnerability(base_url, driver, encode_times, vulnerable_urls, payloads, index, total_urls, debug, require_star)
-    
-    return valid_urls
-
-def scan_urls_from_stdin(driver, encode_times, vulnerable_urls, payloads, debug=False, require_star=False):
-    valid_urls = []
-    if sys.stdin.isatty():
-        print("\033[0;37m[?] Enter URLs (one per line, press Ctrl+D or empty line to finish):\033[0m")
-        # Collect all URLs first for interactive input
-        lines = []
-        while True:
-            try:
-                line = input()
-                if not line:
-                    break
-                lines.append(line)
-            except EOFError:
-                break
-    else:
-        lines = sys.stdin.readlines()
-
-    # First pass: Collect valid URLs with query parameters
-    for line in lines:
-        base_url = line.strip()
-        if not base_url:
-            continue
-        if is_valid_url(base_url):
-            query_params = extract_query_parameter_name(base_url)
-            if query_params:
-                valid_urls.append(base_url)
-        else:
-            print(f"\033[0;31m[!] Invalid URL skipped: {base_url}\033[0m")
-
-    total_urls = len(valid_urls)
-    for index, base_url in enumerate(valid_urls, start=1):
-        check_xss_vulnerability(base_url, driver, encode_times, vulnerable_urls, payloads, index, total_urls, debug, require_star)
-    
-    return valid_urls
-
-def scan_single_url(url, driver, encode_times, vulnerable_urls, payloads, debug=False, require_star=False):
-    valid_urls = []
-    if is_valid_url(url):
-        query_params = extract_query_parameter_name(url)
-        if query_params:
-            valid_urls.append(url)
-            # Single URL, so total_urls is 1
-            check_xss_vulnerability(url, driver, encode_times, vulnerable_urls, payloads, 1, 1, debug, require_star)
-        else:
-            print(f"\033[0;31m[!] URL skipped: No query parameters found: {url}\033[0m")
-    else:
-        print(f"\033[0;31m[!] Invalid URL skipped: {url}\033[0m")
-    return valid_urls
-
-def main():
-    parser = argparse.ArgumentParser(description="Blind XSS Vulnerability Scanner")
-    group = parser.add_mutually_exclusive_group()
-    group.add_argument("-f", "--file", help="File containing URLs to scan (default: read from stdin)")
-    group.add_argument("-u", "--url", help="Single URL to scan")
-    parser.add_argument("-p", "--payloads", required=True, help="File containing XSS payloads")
-    parser.add_argument("-e", "--encode", type=int, default=0, choices=range(4), help="Number of times to encode payloads (0-3, default 0)")
-    parser.add_argument("-o", "--output", help="File to save scan results (optional)")
-    parser.add_argument("--debug", action="store_true", help="Enable debug output for query parameters and * detection")
-    parser.add_argument("--require-star", action="store_true", help="Skip URLs without * in query parameters")
-    args = parser.parse_args()
-
-    display_welcome_message()
-
-    payloads = load_payloads(args.payloads)
-    print(f"\033[1;34m[i] Loaded {len(payloads)} payloads from {args.payloads}\033[0m")
-
-    print("\n\033[1;33m[i] Loading, Please Wait...\033[0m")
-    time.sleep(3)
-
-    print("\033[1;34m[i] Starting BXSS vulnerability check\033[0m")
-    print("\033[1;36m[i] Starting Web Driver, Please wait...\033[0m\n")
-
-    start_time = time.time()
-    vulnerable_urls = []
-
+def process_url(base_url, encoding_type, vulnerable_urls, payloads, url_index, total_urls):
     options = Options()
     options.add_argument('--headless')
     options.add_argument('--no-sandbox')
@@ -328,31 +206,135 @@ def main():
 
     try:
         driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
+        check_xss_vulnerability(base_url, driver, encoding_type, vulnerable_urls, payloads, url_index, total_urls)
+        driver.quit()
     except Exception as e:
-        print(f"\033[0;31m[!] Failed to initialize WebDriver: {e}\033[0m")
-        if args.debug:
-            print(f"\033[0;33m[DEBUG] Exception details: {traceback.format_exc()}\033[0m")
+        thread_safe_print(f"\033[0;31m[!] Error processing URL {base_url}: {e}\033[0m")
+
+def scan_urls_from_file(file_path, encoding_type, vulnerable_urls, payloads, num_threads):
+    if not os.path.isfile(file_path):
+        thread_safe_print(f"\033[0;31m[!] URL file {file_path} does not exist.\033[0m")
+        sys.exit(1)
+    valid_urls = []
+    with open(file_path, 'r') as file:
+        for line in file:
+            base_url = line.strip()
+            if not base_url:
+                continue
+            if is_valid_url(base_url):
+                query_params = extract_query_parameter_name(base_url)
+                if query_params:
+                    valid_urls.append(base_url)
+            else:
+                thread_safe_print(f"\033[0;31m[!] Invalid URL skipped: {base_url}\033[0m")
+    
+    total_urls = len(valid_urls)
+    with ThreadPoolExecutor(max_workers=num_threads) as executor:
+        futures = [
+            executor.submit(process_url, base_url, encoding_type, vulnerable_urls, payloads, index, total_urls)
+            for index, base_url in enumerate(valid_urls, start=1)
+        ]
+        for future in futures:
+            future.result()  # Wait for all threads to complete
+    
+    return valid_urls
+
+def scan_urls_from_stdin(encoding_type, vulnerable_urls, payloads, num_threads):
+    valid_urls = []
+    if sys.stdin.isatty():
+        thread_safe_print("\033[0;37m[?] Enter URLs (one per line, press Ctrl+D or empty line to finish):\033[0m")
+        lines = []
+        while True:
+            try:
+                line = input()
+                if not line:
+                    break
+                lines.append(line)
+            except EOFError:
+                break
+    else:
+        lines = sys.stdin.readlines()
+
+    for line in lines:
+        base_url = line.strip()
+        if not base_url:
+            continue
+        if is_valid_url(base_url):
+            query_params = extract_query_parameter_name(base_url)
+            if query_params:
+                valid_urls.append(base_url)
+        else:
+            thread_safe_print(f"\033[0;31m[!] Invalid URL skipped: {base_url}\033[0m")
+
+    total_urls = len(valid_urls)
+    with ThreadPoolExecutor(max_workers=num_threads) as executor:
+        futures = [
+            executor.submit(process_url, base_url, encoding_type, vulnerable_urls, payloads, index, total_urls)
+            for index, base_url in enumerate(valid_urls, start=1)
+        ]
+        for future in futures:
+            future.result()  # Wait for all threads to complete
+    
+    return valid_urls
+
+def scan_single_url(url, encoding_type, vulnerable_urls, payloads):
+    valid_urls = []
+    if is_valid_url(url):
+        query_params = extract_query_parameter_name(url)
+        if query_params:
+            valid_urls.append(url)
+            process_url(url, encoding_type, vulnerable_urls, payloads, 1, 1)
+        else:
+            thread_safe_print(f"\033[0;31m[!] URL skipped: No query parameters found: {url}\033[0m")
+    else:
+        thread_safe_print(f"\033[0;31m[!] Invalid URL skipped: {url}\033[0m")
+    return valid_urls
+
+def main():
+    parser = argparse.ArgumentParser(description="Blind XSS Vulnerability Scanner")
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument("-f", "--file", help="File containing URLs to scan (default: read from stdin)")
+    group.add_argument("-u", "--url", help="Single URL to scan")
+    parser.add_argument("-p", "--payloads", required=True, help="File containing XSS payloads")
+    parser.add_argument("-e", "--encode", choices=["url", "base64", "ascii"], default=None, help="Encoding type for payloads (url, base64, ascii; default: none)")
+    parser.add_argument("-t", "--threads", type=int, default=1, help="Number of threads for parallel processing (default: 1)")
+    args = parser.parse_args()
+
+    if args.threads < 1:
+        thread_safe_print("\033[0;31m[!] Number of threads must be at least 1.\033[0m")
         sys.exit(1)
 
+    display_welcome_message()
+
+    payloads = load_payloads(args.payloads)
+    thread_safe_print(f"\033[1;34m[i] Loaded {len(payloads)} payloads from {args.payloads}\033[0m")
+    thread_safe_print(f"\033[1;34m[i] Using {args.threads} thread(s) for scanning\033[0m")
+    if args.encode:
+        thread_safe_print(f"\033[1;34m[i] Encoding payloads with {args.encode}\033[0m")
+
+    thread_safe_print("\n\033[1;33m[i] Loading, Please Wait...\033[0m")
+    time.sleep(3)
+
+    thread_safe_print("\033[1;34m[i] Starting BXSS vulnerability check\033[0m")
+    thread_safe_print("\033[1;36m[i] Starting Web Driver(s), Please wait...\033[0m\n")
+
+    start_time = time.time()
+    vulnerable_urls = []
+
     if args.url:
-        valid_urls = scan_single_url(args.url, driver, args.encode, vulnerable_urls, payloads, args.debug, args.require_star)
+        valid_urls = scan_single_url(args.url, args.encode, vulnerable_urls, payloads)
     elif args.file:
-        valid_urls = scan_urls_from_file(args.file, driver, args.encode, vulnerable_urls, payloads, args.debug, args.require_star)
+        valid_urls = scan_urls_from_file(args.file, args.encode, vulnerable_urls, payloads, args.threads)
     else:
-        valid_urls = scan_urls_from_stdin(driver, args.encode, vulnerable_urls, payloads, args.debug, args.require_star)
+        valid_urls = scan_urls_from_stdin(args.encode, vulnerable_urls, payloads, args.threads)
 
     total_scanned = len(valid_urls)
 
-    driver.quit()
-
     elapsed_time = time.time() - start_time
-    print(f"\033[1;33m[i] Scan finished!\033[0m")
-    print(f"\033[1;33m[i] Total URLs Scanned: {total_scanned}\033[0m")
-    print(f"\033[1;33m[i] Time Taken: {int(elapsed_time)} seconds.\033[0m\n")
-
-    save_results_to_file(vulnerable_urls, args.output)
+    thread_safe_print(f"\033[1;33m[i] Scan finished!\033[0m")
+    thread_safe_print(f"\033[1;33m[i] Total URLs Scanned: {total_scanned}\033[0m")
+    thread_safe_print(f"\033[1;33m[i] Time Taken: {int(elapsed_time)} seconds.\033[0m\n")
 
 if __name__ == "__main__":
-    import signal
     signal.signal(signal.SIGINT, handle_exit)
     main()
